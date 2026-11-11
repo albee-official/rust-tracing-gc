@@ -22,6 +22,7 @@ pub struct Tracer {
 }
 
 pub trait Trace {
+    const NEEDS_TRACE: bool = true;
     fn trace(&self, tracer: &Tracer);
 }
 

@@ -28,33 +28,6 @@ impl<T: Trace + 'static> Gc<T> {
     pub fn traced(&self, tracer: &Tracer) -> bool {
         unsafe { self.boxed.as_ref().last_tracer_id.get() == tracer.id }
     }
-
-    pub fn trace(&self, tracer: &Tracer) {
-        let boxed = unsafe { self.boxed.as_ref() };
-
-        match tracer.operation {
-            TraceOperation::Mark { generation } => {
-                boxed.last_tracer_id.set(tracer.id);
-                boxed.generation.set(generation);
-
-                if let Ok(data) = boxed.data.try_borrow() {
-                    data.trace(tracer);
-                }
-            }
-
-            TraceOperation::RootImmediateChildren => {
-                if !self.rooted.replace(true) {
-                    boxed.inc_roots()
-                }
-            }
-
-            TraceOperation::UnrootImmediateChildren => {
-                if self.rooted.replace(false) {
-                    boxed.dec_roots()
-                }
-            }
-        }
-    }
 }
 
 impl<T: Trace + 'static> Clone for Gc<T> {

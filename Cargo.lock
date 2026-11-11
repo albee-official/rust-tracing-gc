@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "gc"
+name = "rust-tracing-gc"
 version = "0.1.0"
