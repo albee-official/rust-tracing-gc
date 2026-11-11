@@ -2,13 +2,15 @@ use std::cell::Cell;
 
 use super::*;
 
+pub(crate) type GcTracerId = u16;
+
 thread_local! {
-    static UUID_SOURCE: Cell<u32> = Cell::from(1);
+    static UUID_SOURCE: Cell<GcTracerId> = Cell::from(1);
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum TraceOperation {
-    Mark { generation: u32 },
+    Mark { generation: GcGenerationNumber },
     UnrootImmediateChildren,
     RootImmediateChildren,
 }
@@ -16,7 +18,7 @@ pub enum TraceOperation {
 #[derive(Clone, Copy, Debug)]
 pub struct Tracer {
     pub(crate) operation: TraceOperation,
-    pub(crate) uuid: u32,
+    pub(crate) id: GcTracerId,
 }
 
 pub trait Trace {
@@ -28,7 +30,10 @@ impl Tracer {
         UUID_SOURCE.with(|source| {
             let uuid = source.get();
             source.set(uuid + 1);
-            Self { operation, uuid }
+            Self {
+                operation,
+                id: uuid,
+            }
         })
     }
 

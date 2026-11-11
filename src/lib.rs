@@ -1,8 +1,10 @@
 mod gc;
+mod gc_borrow;
 mod heap;
 mod tracer;
 
 pub use gc::*;
+pub use gc_borrow::*;
 pub use heap::*;
 pub use tracer::*;
 
@@ -12,14 +14,14 @@ pub(crate) struct RootGuard<'a, T: Trace + 'static> {
 
 impl<'a, T: Trace> RootGuard<'a, T> {
     pub fn new(boxed: &'a GcBox<T>) -> Self {
-        boxed.root();
+        boxed.inc_roots();
         Self { boxed }
     }
 }
 
 impl<T: Trace> Drop for RootGuard<'_, T> {
     fn drop(&mut self) {
-        self.boxed.unroot();
+        self.boxed.dec_roots();
     }
 }
 

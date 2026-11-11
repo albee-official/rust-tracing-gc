@@ -5,12 +5,15 @@ use std::{
 
 use super::*;
 
+pub type GcGenerationNumber = u64;
+pub type GcRootsNumber = u16;
+
 thread_local! {
     static GLOBAL_HEAP: RefCell<GcHeap> = RefCell::new(GcHeap::new());
 }
 
 pub struct GcHeap {
-    generation: u32,
+    generation: GcGenerationNumber,
     allocated: Vec<NonNull<dyn GcAlloc>>,
 }
 
@@ -50,7 +53,7 @@ impl GcHeap {
         GLOBAL_HEAP.with_borrow_mut(|heap| {
             heap.generation += 1;
 
-            // unroot handles reachable by tracer
+            // unroot handles reachable by tracer (this makes sure that all Gc objects inside the heap are NOT roots)
             let unroot_tracer = Tracer::new(TraceOperation::UnrootImmediateChildren);
 
             for allocation in &heap.allocated {
@@ -59,7 +62,6 @@ impl GcHeap {
                 alloc.trace(&unroot_tracer);
             }
 
-            // mark
             let mark_tracer = Tracer::new(TraceOperation::Mark {
                 generation: heap.generation,
             });
@@ -86,20 +88,20 @@ impl GcHeap {
 }
 
 trait GcAlloc {
-    fn is_alive(&self, current_generation: u32) -> bool;
+    fn is_alive(&self, current_generation: GcGenerationNumber) -> bool;
     fn is_rooted(&self) -> bool;
     fn trace(&self, tracer: &Tracer);
 }
 
 pub(crate) struct GcBox<T: Trace + 'static> {
-    pub(crate) generation: Cell<u32>,
-    pub(crate) last_tracer_uuid: Cell<u32>, // uuid of the last visited tracer
-    pub(crate) roots: Cell<u32>,
+    pub(crate) generation: Cell<GcGenerationNumber>,
+    pub(crate) last_tracer_id: Cell<GcTracerId>, // allows for multiple recursive trace passes regardless of the generation
+    pub(crate) roots: Cell<GcRootsNumber>,
     pub(crate) data: RefCell<T>,
 }
 
 impl<T: Trace + 'static> GcAlloc for GcBox<T> {
-    fn is_alive(&self, current_generation: u32) -> bool {
+    fn is_alive(&self, current_generation: GcGenerationNumber) -> bool {
         self.is_rooted() || self.generation.get() == current_generation
     }
 
@@ -118,7 +120,7 @@ impl<T: Trace + 'static> GcBox<T> {
     pub fn new(data: T, heap: &GcHeap) -> Self {
         Self {
             generation: Cell::new(heap.generation),
-            last_tracer_uuid: Cell::new(0),
+            last_tracer_id: Cell::new(0),
             roots: Cell::new(0),
             data: RefCell::from(data),
         }
@@ -127,17 +129,17 @@ impl<T: Trace + 'static> GcBox<T> {
     pub fn new_rooted(data: T, heap: &GcHeap) -> Self {
         Self {
             generation: Cell::new(heap.generation),
-            last_tracer_uuid: Cell::new(0),
+            last_tracer_id: Cell::new(0),
             roots: Cell::new(1),
             data: RefCell::from(data),
         }
     }
 
-    pub fn root(&self) {
+    pub fn inc_roots(&self) {
         self.roots.update(|roots| roots + 1);
     }
 
-    pub fn unroot(&self) {
+    pub fn dec_roots(&self) {
         self.roots.update(|roots| roots - 1);
     }
 }

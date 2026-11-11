@@ -3,8 +3,8 @@ use std::{cell::Cell, ptr::NonNull};
 use super::*;
 
 pub struct Gc<T: Trace + 'static> {
-    rooted: Cell<bool>,
-    boxed: NonNull<GcBox<T>>,
+    pub(crate) rooted: Cell<bool>,
+    pub(crate) boxed: NonNull<GcBox<T>>,
 }
 
 impl<T: Trace + 'static> Gc<T> {
@@ -16,33 +16,17 @@ impl<T: Trace + 'static> Gc<T> {
     }
 
     pub fn with<F: FnOnce(&T) -> R, R>(&self, f: F) -> R {
-        let boxed = unsafe { self.boxed.as_ref() };
-        let _guard = RootGuard::new(boxed);
-        boxed
-            .data
-            .borrow()
-            .trace(&Tracer::new(TraceOperation::RootImmediateChildren));
-
-        let data = boxed.data.borrow();
-        let res = f(&data);
-        res
+        let borrow = self.borrow();
+        f(&borrow)
     }
 
     pub fn with_mut<F: FnOnce(&mut T) -> R, R>(&self, f: F) -> R {
-        let boxed = unsafe { self.boxed.as_ref() };
-        let _guard = RootGuard::new(boxed);
-        boxed
-            .data
-            .borrow()
-            .trace(&Tracer::new(TraceOperation::RootImmediateChildren));
-
-        let mut data = boxed.data.borrow_mut();
-        let res = f(&mut data);
-        res
+        let mut borrow_mut = self.borrow_mut();
+        f(&mut borrow_mut)
     }
 
     pub fn traced(&self, tracer: &Tracer) -> bool {
-        unsafe { self.boxed.as_ref().last_tracer_uuid.get() == tracer.uuid }
+        unsafe { self.boxed.as_ref().last_tracer_id.get() == tracer.id }
     }
 
     pub fn trace(&self, tracer: &Tracer) {
@@ -50,7 +34,7 @@ impl<T: Trace + 'static> Gc<T> {
 
         match tracer.operation {
             TraceOperation::Mark { generation } => {
-                boxed.last_tracer_uuid.set(tracer.uuid);
+                boxed.last_tracer_id.set(tracer.id);
                 boxed.generation.set(generation);
 
                 if let Ok(data) = boxed.data.try_borrow() {
@@ -60,13 +44,13 @@ impl<T: Trace + 'static> Gc<T> {
 
             TraceOperation::RootImmediateChildren => {
                 if !self.rooted.replace(true) {
-                    boxed.root()
+                    boxed.inc_roots()
                 }
             }
 
             TraceOperation::UnrootImmediateChildren => {
                 if self.rooted.replace(false) {
-                    boxed.unroot()
+                    boxed.dec_roots()
                 }
             }
         }
@@ -76,7 +60,7 @@ impl<T: Trace + 'static> Gc<T> {
 impl<T: Trace + 'static> Clone for Gc<T> {
     fn clone(&self) -> Self {
         unsafe {
-            self.boxed.as_ref().root();
+            self.boxed.as_ref().inc_roots();
         }
 
         Self {
@@ -89,7 +73,7 @@ impl<T: Trace + 'static> Clone for Gc<T> {
 impl<T: Trace + 'static> Drop for Gc<T> {
     fn drop(&mut self) {
         if self.rooted.get() {
-            unsafe { self.boxed.as_ref() }.unroot();
+            unsafe { self.boxed.as_ref() }.dec_roots();
         }
     }
 }
