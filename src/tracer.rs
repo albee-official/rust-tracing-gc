@@ -22,8 +22,14 @@ pub struct Tracer {
 }
 
 pub trait Trace {
-    const NEEDS_TRACE: bool = true;
     fn trace(&self, tracer: &Tracer);
+
+    fn needs_trace() -> bool
+    where
+        Self: Sized,
+    {
+        true
+    }
 }
 
 impl Tracer {
@@ -38,17 +44,9 @@ impl Tracer {
         })
     }
 
-    pub fn trace<T: Trace>(&self, obj: &Gc<T>) {
-        match self.operation {
-            TraceOperation::UnrootImmediateChildren | TraceOperation::RootImmediateChildren => {
-                obj.trace(self)
-            }
-
-            TraceOperation::Mark { .. } => {
-                if !obj.traced(self) {
-                    obj.trace(self)
-                }
-            }
+    pub fn trace<T: Trace>(&self, obj: &T) {
+        if T::needs_trace() {
+            obj.trace(self)
         }
     }
 }

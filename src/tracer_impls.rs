@@ -8,10 +8,15 @@ impl<T: Trace> Trace for Gc<T> {
 
         match tracer.operation {
             TraceOperation::Mark { generation } => {
+                // do not visit other gc objects if already visited them
+                if self.traced(tracer) {
+                    return;
+                }
+
                 boxed.last_tracer_id.set(tracer.id);
                 boxed.generation.set(generation);
 
-                if T::NEEDS_TRACE
+                if T::needs_trace()
                     && let Ok(data) = boxed.data.try_borrow()
                 {
                     data.trace(tracer);
@@ -34,10 +39,15 @@ impl<T: Trace> Trace for Gc<T> {
 }
 
 impl<T: Trace> Trace for Option<T> {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
+    fn needs_trace() -> bool
+    where
+        Self: Sized,
+    {
+        T::needs_trace()
+    }
 
     fn trace(&self, tracer: &Tracer) {
-        if !T::NEEDS_TRACE {
+        if !T::needs_trace() {
             return;
         }
 
@@ -48,7 +58,12 @@ impl<T: Trace> Trace for Option<T> {
 }
 
 impl<T: Trace, Error: Trace> Trace for Result<T, Error> {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE || Error::NEEDS_TRACE;
+    fn needs_trace() -> bool
+    where
+        Self: Sized,
+    {
+        T::needs_trace() || Error::needs_trace()
+    }
 
     fn trace(&self, tracer: &Tracer) {
         match self {
@@ -59,10 +74,8 @@ impl<T: Trace, Error: Trace> Trace for Result<T, Error> {
 }
 
 impl<T: Trace> Trace for [T] {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
-
     fn trace(&self, tracer: &Tracer) {
-        if !T::NEEDS_TRACE {
+        if !T::needs_trace() {
             return;
         }
 
@@ -72,12 +85,50 @@ impl<T: Trace> Trace for [T] {
     }
 }
 
+impl<T: Trace, const N: usize> Trace for [T; N] {
+    fn needs_trace() -> bool {
+        T::needs_trace()
+    }
+
+    fn trace(&self, tracer: &Tracer) {
+        self.as_slice().trace(tracer)
+    }
+}
+
+#[macro_export]
+macro_rules! impl_trace_smart_ptr {
+    ($($ptr:ident),* $(,)?) => {
+        $(
+            impl<T: Trace> Trace for $ptr<T> {
+                fn needs_trace() -> bool { T::needs_trace() }
+                fn trace(&self, tracer: &Tracer) { (**self).trace(tracer) }
+            }
+
+            impl<T: Trace> Trace for $ptr<[T]> {
+                fn needs_trace() -> bool { T::needs_trace() }
+                fn trace(&self, tracer: &Tracer) { (**self).trace(tracer) }
+            }
+
+            impl Trace for $ptr<dyn Trace> {
+                fn trace(&self, tracer: &Tracer) { (**self).trace(tracer) }
+            }
+        )*
+    };
+}
+
 #[macro_export]
 macro_rules! impl_trace_leaf {
     ($($t:ty),* $(,)?) => {
-        $( impl Trace for $t {
-                const NEEDS_TRACE: bool = false;
-                fn trace(&self, _: &Tracer) { }
+        $(
+            impl Trace for $t {
+                fn needs_trace() -> bool
+                where
+                    Self: Sized,
+                {
+                    false
+                }
+
+                fn trace(&self, _: &Tracer) {}
             }
         )*
     };
@@ -88,18 +139,28 @@ macro_rules! impl_trace_iter {
     ($($t:ident),* $(,)?) => {
         $(
             impl<T: Trace> Trace for $t<T> {
-                const NEEDS_TRACE: bool = T::NEEDS_TRACE;
+                fn needs_trace() -> bool
+                where
+                    Self: Sized,
+                {
+                    T::needs_trace()
+                }
+
                 fn trace(&self, tracer: &Tracer) {
-                    if !T::NEEDS_TRACE {
+                    if !T::needs_trace() {
                         return;
                     }
 
-                    for x in self { x.trace(tracer); }
+                    for x in self {
+                        x.trace(tracer);
+                    }
                 }
             }
         )*
     };
 }
+
+impl_trace_smart_ptr!(Box);
 
 impl_trace_iter!(Vec, VecDeque, HashSet, BTreeSet);
 
