@@ -1,32 +1,28 @@
-use std::{
-    cell::{Cell, RefCell},
-    ptr::NonNull,
-};
+use std::cell::{Cell, RefCell};
 
 use super::*;
 
 pub(crate) type GcTracerId = u64;
-pub(crate) type VisitStack = Vec<NonNull<dyn GcAlloc>>;
+pub(crate) type VisitStack = Vec<GcErasedObjectPtr>;
+pub type TracerFnVisitor = Box<dyn FnMut(GcErasedObjectPtr)>;
 
 thread_local! {
     static ID_SOURCE: Cell<GcTracerId> = Cell::from(1);
     static VISIT_STACK_POOL: RefCell<Vec<VisitStack>> = RefCell::new(vec![]);
 }
 
-#[derive(Clone, Copy, Debug)]
 pub enum TraceOperation {
     Mark { generation: GcGenerationNumber },
     Unroot,
     Root,
+    VisitFn { visitor: TracerFnVisitor },
 }
 
-#[derive(Clone, Copy, Debug)]
 pub enum TraceTraversal {
     Deep { id: GcTracerId },
     Shallow,
 }
 
-#[derive(Clone)]
 pub struct Tracer {
     pub(crate) operation: TraceOperation,
     pub(crate) traversal: TraceTraversal,
@@ -81,8 +77,12 @@ impl Tracer {
         Self::new(TraceOperation::Root, TraceTraversal::Shallow)
     }
 
-    pub fn unroot_shallow() -> Self {
+    pub unsafe fn unroot_shallow() -> Self {
         Self::new(TraceOperation::Unroot, TraceTraversal::Shallow)
+    }
+
+    pub fn visit_shallow(visitor: TracerFnVisitor) -> Self {
+        Self::new(TraceOperation::VisitFn { visitor }, TraceTraversal::Shallow)
     }
 
     fn new(operation: TraceOperation, traversal: TraceTraversal) -> Self {
@@ -93,21 +93,20 @@ impl Tracer {
         }
     }
 
-    pub fn was_last_visitor_of<T: Trace>(&self, ptr: NonNull<GcObject<T>>) -> bool {
+    pub fn was_last_visitor_of<T: Trace>(&self, ptr: GcObjectPtr<T>) -> bool {
         match self.traversal {
-            TraceTraversal::Deep { id } => unsafe { ptr.as_ref() }.last_deep_tracer_id.get() == id,
+            TraceTraversal::Deep { id } => unsafe { ptr.as_ref() }.get_last_deep_tracer_id() == id,
             TraceTraversal::Shallow => false,
         }
     }
 
     /// visits all objects reachable from obj
     pub fn visit_from<T: Trace>(&mut self, obj: &Gc<T>) {
-        self.push_next(obj);
-        self.visit_stack();
+        self.visit_from_ptr(obj.as_ptr())
     }
 
     /// visits all objects reachable from ptr to the obj
-    pub(crate) fn visit_from_ptr<T: Trace>(&mut self, ptr: NonNull<GcObject<T>>) {
+    pub(crate) fn visit_from_ptr<T: Trace>(&mut self, ptr: GcObjectPtr<T>) {
         self.push_next_ptr(ptr);
         self.visit_stack();
     }
@@ -128,17 +127,11 @@ impl Tracer {
 
     /// pushes object ponted by the Gc ptr to the visit stack
     pub fn push_next<T: Trace>(&mut self, obj: &Gc<T>) {
-        self.visit_stack.push(obj.ptr);
+        self.push_next_ptr(obj.as_ptr())
     }
 
     /// pushes object ponted by the raw ptr to the visit stack
-    pub(crate) fn push_next_ptr<T: Trace>(&mut self, ptr: NonNull<GcObject<T>>) {
-        // println!(
-        //     "queue next: {:?}, {}",
-        //     std::ptr::from_ref(boxed),
-        //     self.visit_queue.len()
-        // );
-
+    pub fn push_next_ptr<T: Trace>(&mut self, ptr: GcObjectPtr<T>) {
         self.visit_stack.push(ptr);
     }
 }

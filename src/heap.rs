@@ -8,6 +8,8 @@ use super::*;
 
 pub type GcGenerationNumber = u64;
 pub type GcRootsNumber = u16;
+pub type GcObjectPtr<T> = NonNull<GcObject<T>>;
+pub type GcErasedObjectPtr = NonNull<dyn GcAlloc>;
 
 thread_local! {
     static GLOBAL_HEAP: RefCell<GcHeap> = RefCell::new(GcHeap::new());
@@ -15,13 +17,15 @@ thread_local! {
 
 pub struct GcHeap {
     generation: GcGenerationNumber,
-    objects: Vec<NonNull<dyn GcAlloc>>,
+    dirty_objects: Vec<GcErasedObjectPtr>,
+    objects: Vec<GcErasedObjectPtr>,
 }
 
 impl GcHeap {
     pub(crate) fn new() -> Self {
         Self {
             generation: 0,
+            dirty_objects: vec![],
             objects: vec![],
         }
     }
@@ -31,11 +35,12 @@ impl GcHeap {
         GLOBAL_HEAP.with_borrow(|h| h.objects.len())
     }
 
-    pub fn alloc<T: Trace + 'static>(data: T) -> NonNull<GcObject<T>> {
+    pub fn alloc<T: Trace + 'static>(data: T) -> GcObjectPtr<T> {
         GLOBAL_HEAP.with_borrow_mut(|heap| {
             let boxed = Box::new(GcObject::new(data, heap));
             let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(boxed)) };
             heap.objects.push(ptr);
+            heap.dirty_objects.push(ptr);
             ptr
         })
     }
@@ -45,22 +50,25 @@ impl GcHeap {
             heap.generation += 1;
 
             // unroot handles reachable by tracer (this makes sure that all Gc objects inside the heap are NOT roots)
-            let mut unroot_tracer = Tracer::unroot_shallow();
+            let mut unroot_tracer = unsafe { Tracer::unroot_shallow() };
 
-            for allocation in &heap.objects {
-                let alloc = unsafe { allocation.as_ref() };
+            for ptr in heap.dirty_objects.drain(..) {
+                let obj = unsafe { ptr.as_ref() };
+                assert!(obj.is_dirty(), "object should be dirty");
 
-                alloc.trace_data(&mut unroot_tracer);
+                obj.trace_data(&mut unroot_tracer);
                 unroot_tracer.visit_stack();
+
+                obj.clear_dirty();
             }
 
             let mut mark_tracer = Tracer::mark_deep(heap.generation);
 
-            for allocation in &heap.objects {
-                let alloc = unsafe { allocation.as_ref() };
+            for ptr in &heap.objects {
+                let obj = unsafe { ptr.as_ref() };
 
-                if alloc.is_rooted() {
-                    alloc.trace_data(&mut mark_tracer);
+                if obj.is_rooted() {
+                    obj.trace_data(&mut mark_tracer);
                     mark_tracer.visit_stack();
                 }
             }
@@ -76,24 +84,57 @@ impl GcHeap {
             });
         });
     }
+
+    pub fn objects<'a>(&'a self) -> &'a [GcErasedObjectPtr] {
+        &self.objects
+    }
+
+    pub fn dirty_objects<'a>(&'a self) -> &'a [GcErasedObjectPtr] {
+        &self.dirty_objects
+    }
+
+    pub fn with<F: FnOnce(&GcHeap) -> R, R>(f: F) -> R {
+        GLOBAL_HEAP.with_borrow(f)
+    }
 }
 
 pub trait GcAlloc {
     fn is_alive(&self, current_generation: GcGenerationNumber) -> bool;
+    fn get_last_deep_tracer_id(&self) -> GcTracerId;
+    fn set_last_deep_tracer_id(&self, id: GcTracerId);
+    fn set_generation(&self, id: GcGenerationNumber);
     fn is_rooted(&self) -> bool;
+    fn mark_dirty(&self) -> bool;
+    fn clear_dirty(&self) -> bool;
+    fn is_dirty(&self) -> bool;
     fn trace_data(&self, tracer: &mut Tracer);
 }
 
+#[derive(Debug)]
 pub struct GcObject<T: Trace + 'static> {
-    pub(crate) generation: Cell<GcGenerationNumber>,
-    pub(crate) last_deep_tracer_id: Cell<GcTracerId>, // allows for multiple recursive trace passes regardless of the generation
-    pub(crate) roots: Cell<GcRootsNumber>,
+    generation: Cell<GcGenerationNumber>,
+    last_deep_tracer_id: Cell<GcTracerId>, // allows for multiple recursive trace passes regardless of the generation
+    roots: Cell<GcRootsNumber>,
+    dirty: Cell<bool>,
+
     pub(crate) data: RefCell<T>,
 }
 
 impl<T: Trace + 'static> GcAlloc for GcObject<T> {
     fn is_alive(&self, current_generation: GcGenerationNumber) -> bool {
         self.is_rooted() || self.generation.get() == current_generation
+    }
+
+    fn set_generation(&self, num: GcGenerationNumber) {
+        self.generation.set(num);
+    }
+
+    fn get_last_deep_tracer_id(&self) -> GcTracerId {
+        self.last_deep_tracer_id.get()
+    }
+
+    fn set_last_deep_tracer_id(&self, id: GcTracerId) {
+        self.last_deep_tracer_id.set(id)
     }
 
     fn is_rooted(&self) -> bool {
@@ -109,13 +150,34 @@ impl<T: Trace + 'static> GcAlloc for GcObject<T> {
             // thus they will be visited by the mark anyway so it's safe to just skip it
         }
     }
+
+    fn mark_dirty(&self) -> bool {
+        let was_clear = !self.dirty.replace(true);
+        if was_clear {
+            GLOBAL_HEAP.with_borrow_mut(|heap| {
+                heap.dirty_objects.push(NonNull::from(self));
+            })
+        }
+
+        was_clear
+    }
+
+    /// does not automatically remove from dirty_objects vec inside the heap
+    fn clear_dirty(&self) -> bool {
+        self.dirty.replace(false)
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.dirty.get()
+    }
 }
 
 impl<T: Trace + 'static> GcObject<T> {
-    pub fn new(data: T, heap: &GcHeap) -> Self {
+    pub(crate) fn new(data: T, heap: &mut GcHeap) -> Self {
         Self {
             generation: Cell::new(heap.generation),
             last_deep_tracer_id: Cell::new(0),
+            dirty: Cell::from(true),
             roots: Cell::new(0),
             data: RefCell::from(data),
         }
@@ -143,11 +205,11 @@ impl Drop for GcHeap {
 }
 
 pub(crate) struct RootGuard<T: Trace + 'static> {
-    ptr: NonNull<GcObject<T>>,
+    ptr: GcObjectPtr<T>,
 }
 
 impl<T: Trace + 'static> RootGuard<T> {
-    pub fn new(ptr: NonNull<GcObject<T>>) -> Self {
+    pub fn new(ptr: GcObjectPtr<T>) -> Self {
         let boxed = unsafe { ptr.as_ref() };
         boxed.inc_roots();
 
@@ -155,7 +217,7 @@ impl<T: Trace + 'static> RootGuard<T> {
     }
 
     #[allow(unused)]
-    pub fn get_ptr(&self) -> NonNull<GcObject<T>> {
+    pub fn get_ptr(&self) -> GcObjectPtr<T> {
         self.ptr
     }
 }
@@ -179,7 +241,7 @@ pub struct RootGuardCell<T: Trace + 'static> {
 }
 
 impl<T: Trace + 'static> RootGuardCell<T> {
-    pub fn new_rooted(boxed: NonNull<GcObject<T>>) -> Self {
+    pub fn new_rooted(boxed: GcObjectPtr<T>) -> Self {
         Self {
             guard: Cell::new(Some(RootGuard::new(boxed))),
         }
@@ -199,7 +261,7 @@ impl<T: Trace + 'static> RootGuardCell<T> {
         }
     }
 
-    pub fn get_ptr(&self) -> Option<NonNull<GcObject<T>>> {
+    pub fn get_ptr(&self) -> Option<GcObjectPtr<T>> {
         let value = unsafe { self.guard.as_ptr().as_ref_unchecked() };
         match value {
             Some(guard) => Some(guard.ptr),
@@ -208,7 +270,7 @@ impl<T: Trace + 'static> RootGuardCell<T> {
     }
 
     /// true if guard updated it's pointer
-    pub fn root(&self, ptr: NonNull<GcObject<T>>) -> bool {
+    pub fn root(&self, ptr: GcObjectPtr<T>) -> bool {
         let old = self.guard.take();
         if let Some(g) = &old {
             if g.ptr == ptr {

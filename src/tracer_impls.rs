@@ -4,18 +4,18 @@ use super::*;
 
 impl<T: Trace> Trace for Gc<T> {
     fn trace(&self, tracer: &mut Tracer) {
-        let ptr = unsafe { self.ptr.as_ref() };
+        let obj = unsafe { self.as_ptr().as_ref() };
 
         match tracer.traversal {
             TraceTraversal::Deep { id } => {
-                if tracer.was_last_visitor_of(self.ptr) {
+                if tracer.was_last_visitor_of(self.as_ptr()) {
                     return;
                 }
 
-                ptr.last_deep_tracer_id.set(id);
+                obj.set_last_deep_tracer_id(id);
 
                 if T::needs_trace() {
-                    tracer.push_next_ptr(self.ptr);
+                    tracer.push_next_ptr(self.as_ptr());
                 }
             }
 
@@ -24,16 +24,19 @@ impl<T: Trace> Trace for Gc<T> {
 
         match tracer.operation {
             TraceOperation::Mark { generation } => {
-                ptr.generation.set(generation);
+                obj.set_generation(generation);
             }
 
             TraceOperation::Root => {
-                self.root_cell.root(self.ptr);
+                self.root();
             }
 
-            TraceOperation::Unroot => {
-                self.root_cell.unroot();
-            }
+            // SAFETY: unroot trace is itself unsafe
+            TraceOperation::Unroot => unsafe {
+                self.unroot();
+            },
+
+            TraceOperation::VisitFn { ref mut visitor } => visitor(self.as_ptr()),
         }
     }
 }

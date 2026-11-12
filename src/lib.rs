@@ -12,7 +12,7 @@ pub use tracer::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::Cell, rc::Rc};
+    use std::{cell::Cell, ptr::NonNull, rc::Rc};
 
     #[derive(Debug)]
     struct Node {
@@ -125,11 +125,11 @@ mod tests {
             seed
         };
 
-        let iters = 1000;
+        let iters = 1_000;
         let mut handles: Vec<Gc<Node>> = vec![];
 
         for iteration in 0..iters {
-            if iteration % 10 == 0 {
+            if iteration % 100 == 0 {
                 println!("[stress]: {iteration}");
             }
 
@@ -162,6 +162,16 @@ mod tests {
 
         drop(handles);
         GcHeap::collect();
+        // GcHeap::with(|heap| {
+        //     for ptr in heap.objects() {
+        //         println!("allocated: {:?}", ptr);
+        //         let ptr = ptr.as_ptr();
+        //         let node_object = unsafe { (ptr as *mut GcObject<Node>).as_mut_unchecked() };
+        //         dbg!(node_object);
+
+        //         println!("");
+        //     }
+        // });
         assert_eq!(GcHeap::live_count(), 0); // everything must eventually be freed
     }
 }

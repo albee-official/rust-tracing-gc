@@ -19,88 +19,87 @@ pub struct GcBorrowMut<'a, T: Trace + 'static> {
 
 impl<T: Trace + 'static> Gc<T> {
     pub fn borrow<'a>(&self) -> GcBorrow<'a, T> {
-        let boxed = unsafe { self.ptr.as_ref() };
+        let obj = unsafe { self.as_ptr().as_ref() };
 
         // rooting the object itself keeps it alive
-        let _root_guard = RootGuard::new(self.ptr);
+        let _root_guard = RootGuard::new(self.as_ptr());
 
         // rooting it's fields means that any value moved out of the struct will be rooted
-        Tracer::root_shallow().visit_from_ptr(self.ptr);
+        Tracer::root_shallow().visit_from(self);
 
         GcBorrow {
-            borrow: boxed.data.borrow(),
+            borrow: obj.data.borrow(),
             _root_guard,
         }
     }
 
     pub fn try_borrow<'a>(&self) -> Result<GcBorrow<'a, T>, BorrowError> {
-        let boxed = unsafe { self.ptr.as_ref() };
-        let _ = boxed.data.try_borrow()?;
+        let obj = unsafe { self.as_ptr().as_ref() };
 
         // rooting the object itself keeps it alive
-        let _root_guard = RootGuard::new(self.ptr);
+        let _root_guard = RootGuard::new(self.as_ptr());
 
         // rooting it's fields means that any value moved out of the struct will be rooted
-        Tracer::root_shallow().visit_from_ptr(self.ptr);
+        Tracer::root_shallow().visit_from(self);
 
         Ok(GcBorrow {
-            borrow: boxed.data.try_borrow()?,
+            borrow: obj.data.try_borrow()?,
             _root_guard,
         })
     }
 
     pub unsafe fn borrow_unsafe<'a>(&self) -> GcBorrow<'a, T> {
-        let boxed = unsafe { self.ptr.as_ref() };
+        let obj = unsafe { self.as_ptr().as_ref() };
 
         // rooting the object itself keeps it alive
-        let _root_guard = RootGuard::new(self.ptr);
+        let _root_guard = RootGuard::new(self.as_ptr());
 
         GcBorrow {
-            borrow: boxed.data.borrow(),
+            borrow: obj.data.borrow(),
             _root_guard,
         }
     }
 
+    /// does not root the members of the object.
+    /// use it when you can guarantee that you will NOT move any pointers out of the object
     pub unsafe fn try_borrow_unsafe<'a>(&self) -> Result<GcBorrow<'a, T>, BorrowError> {
-        let boxed = unsafe { self.ptr.as_ref() };
-        let _ = boxed.data.try_borrow()?;
+        let obj = unsafe { self.as_ptr().as_ref() };
 
         // rooting the object itself keeps it alive
-        let _root_guard = RootGuard::new(self.ptr);
+        let _root_guard = RootGuard::new(self.as_ptr());
 
         Ok(GcBorrow {
-            borrow: boxed.data.try_borrow()?,
+            borrow: obj.data.try_borrow()?,
             _root_guard,
         })
     }
 
     pub fn borrow_mut<'a>(&self) -> GcBorrowMut<'a, T> {
-        let boxed = unsafe { self.ptr.as_ref() };
+        let obj = unsafe { self.as_ptr().as_ref() };
 
         // rooting the object itself keeps it alive
-        let _root_guard = RootGuard::new(self.ptr);
+        let _root_guard = RootGuard::new(self.as_ptr());
 
         // rooting it's fields means that any value moved out of the struct will be rooted
-        Tracer::root_shallow().visit_from_ptr(self.ptr);
+        Tracer::root_shallow().visit_from(self);
 
         GcBorrowMut {
-            borrow: boxed.data.borrow_mut(),
+            borrow: obj.data.borrow_mut(),
             _root_guard,
         }
     }
 
     pub fn try_borrow_mut<'a>(&self) -> Result<GcBorrowMut<'a, T>, BorrowMutError> {
-        let boxed = unsafe { self.ptr.as_ref() };
-        let _ = boxed.data.try_borrow_mut()?;
+        let obj = unsafe { self.as_ptr().as_ref() };
 
         // rooting the object itself keeps it alive
-        let _root_guard = RootGuard::new(self.ptr);
+        let _root_guard = RootGuard::new(self.as_ptr());
 
         // rooting it's fields means that any value moved out of the struct will be rooted
-        Tracer::root_shallow().visit_from_ptr(self.ptr);
+        Tracer::root_shallow().visit_from(self);
 
         Ok(GcBorrowMut {
-            borrow: boxed.data.try_borrow_mut()?,
+            borrow: obj.data.try_borrow_mut()?,
             _root_guard,
         })
     }
@@ -125,5 +124,17 @@ impl<T: Trace + 'static> Deref for GcBorrowMut<'_, T> {
 impl<T: Trace + 'static> DerefMut for GcBorrowMut<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.borrow
+    }
+}
+
+impl<T: Trace + 'static> Drop for GcBorrow<'_, T> {
+    fn drop(&mut self) {
+        unsafe { self._root_guard.get_ptr().as_ref() }.mark_dirty();
+    }
+}
+
+impl<T: Trace + 'static> Drop for GcBorrowMut<'_, T> {
+    fn drop(&mut self) {
+        unsafe { self._root_guard.get_ptr().as_ref() }.mark_dirty();
     }
 }
