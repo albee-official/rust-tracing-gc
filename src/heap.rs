@@ -51,7 +51,7 @@ impl GcHeap {
                 let alloc = unsafe { allocation.as_ref() };
 
                 alloc.trace_data(&mut unroot_tracer);
-                unroot_tracer.visit_queue();
+                unroot_tracer.visit_stack();
             }
 
             let mut mark_tracer = Tracer::mark_deep(heap.generation);
@@ -61,7 +61,7 @@ impl GcHeap {
 
                 if alloc.is_rooted() {
                     alloc.trace_data(&mut mark_tracer);
-                    mark_tracer.visit_queue();
+                    mark_tracer.visit_stack();
                 }
             }
 

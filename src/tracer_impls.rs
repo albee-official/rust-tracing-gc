@@ -15,7 +15,7 @@ impl<T: Trace> Trace for Gc<T> {
                 ptr.last_deep_tracer_id.set(id);
 
                 if T::needs_trace() {
-                    tracer.queue_next_ptr(self.ptr);
+                    tracer.push_next_ptr(self.ptr);
                 }
             }
 
