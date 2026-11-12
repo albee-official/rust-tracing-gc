@@ -8,76 +8,99 @@ use super::*;
 /// a borrow of a [`Gc<T>`]. Keeps the data and it's fields rooted while it's in use.
 pub struct GcBorrow<'a, T: Trace + 'static> {
     borrow: Ref<'a, T>,
-    _root_guard: RootGuard<'a, T>,
+    _root_guard: RootGuard<T>,
 }
 
 /// a mutable borrow of a [`Gc<T>`]. Keeps the data and it's fields rooted while it's in use.
 pub struct GcBorrowMut<'a, T: Trace + 'static> {
     borrow: RefMut<'a, T>,
-    _root_guard: RootGuard<'a, T>,
+    _root_guard: RootGuard<T>,
 }
 
 impl<T: Trace + 'static> Gc<T> {
     pub fn borrow<'a>(&self) -> GcBorrow<'a, T> {
-        let boxed = unsafe { self.boxed.as_ref() };
+        let boxed = unsafe { self.ptr.as_ref() };
 
         // rooting the object itself keeps it alive
-        let _root_guard = RootGuard::new(boxed);
-        let borrow = boxed.data.borrow();
+        let _root_guard = RootGuard::new(self.ptr);
 
         // rooting it's fields means that any value moved out of the struct will be rooted
-        borrow.trace(&Tracer::new(TraceOperation::RootImmediateChildren));
+        Tracer::root_shallow().visit_from_ptr(self.ptr);
 
         GcBorrow {
-            borrow,
+            borrow: boxed.data.borrow(),
             _root_guard,
         }
     }
 
     pub fn try_borrow<'a>(&self) -> Result<GcBorrow<'a, T>, BorrowError> {
-        let boxed = unsafe { self.boxed.as_ref() };
-        let borrow = boxed.data.try_borrow()?; // avoid rooting in case borrow is unsuccessful
+        let boxed = unsafe { self.ptr.as_ref() };
+        let _ = boxed.data.try_borrow()?;
 
         // rooting the object itself keeps it alive
-        let _root_guard = RootGuard::new(boxed);
+        let _root_guard = RootGuard::new(self.ptr);
 
         // rooting it's fields means that any value moved out of the struct will be rooted
-        borrow.trace(&Tracer::new(TraceOperation::RootImmediateChildren));
+        Tracer::root_shallow().visit_from_ptr(self.ptr);
 
         Ok(GcBorrow {
-            borrow,
+            borrow: boxed.data.try_borrow()?,
+            _root_guard,
+        })
+    }
+
+    pub unsafe fn borrow_unsafe<'a>(&self) -> GcBorrow<'a, T> {
+        let boxed = unsafe { self.ptr.as_ref() };
+
+        // rooting the object itself keeps it alive
+        let _root_guard = RootGuard::new(self.ptr);
+
+        GcBorrow {
+            borrow: boxed.data.borrow(),
+            _root_guard,
+        }
+    }
+
+    pub unsafe fn try_borrow_unsafe<'a>(&self) -> Result<GcBorrow<'a, T>, BorrowError> {
+        let boxed = unsafe { self.ptr.as_ref() };
+        let _ = boxed.data.try_borrow()?;
+
+        // rooting the object itself keeps it alive
+        let _root_guard = RootGuard::new(self.ptr);
+
+        Ok(GcBorrow {
+            borrow: boxed.data.try_borrow()?,
             _root_guard,
         })
     }
 
     pub fn borrow_mut<'a>(&self) -> GcBorrowMut<'a, T> {
-        let boxed = unsafe { self.boxed.as_ref() };
+        let boxed = unsafe { self.ptr.as_ref() };
 
         // rooting the object itself keeps it alive
-        let _root_guard = RootGuard::new(boxed);
-        let borrow = boxed.data.borrow_mut();
+        let _root_guard = RootGuard::new(self.ptr);
 
         // rooting it's fields means that any value moved out of the struct will be rooted
-        borrow.trace(&Tracer::new(TraceOperation::RootImmediateChildren));
+        Tracer::root_shallow().visit_from_ptr(self.ptr);
 
         GcBorrowMut {
-            borrow,
+            borrow: boxed.data.borrow_mut(),
             _root_guard,
         }
     }
 
     pub fn try_borrow_mut<'a>(&self) -> Result<GcBorrowMut<'a, T>, BorrowMutError> {
-        let boxed = unsafe { self.boxed.as_ref() };
-        let borrow = boxed.data.try_borrow_mut()?;
+        let boxed = unsafe { self.ptr.as_ref() };
+        let _ = boxed.data.try_borrow_mut()?;
 
         // rooting the object itself keeps it alive
-        let _root_guard = RootGuard::new(boxed);
+        let _root_guard = RootGuard::new(self.ptr);
 
         // rooting it's fields means that any value moved out of the struct will be rooted
-        borrow.trace(&Tracer::new(TraceOperation::RootImmediateChildren));
+        Tracer::root_shallow().visit_from_ptr(self.ptr);
 
         Ok(GcBorrowMut {
-            borrow,
+            borrow: boxed.data.try_borrow_mut()?,
             _root_guard,
         })
     }

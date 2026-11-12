@@ -76,6 +76,6 @@ Passing Miri shows that the tested executions had no undefined behavior. It does
 
 ## Roadmap
 
-- `#[derive(Trace)]`
-- Explicit mark stack instead of recursion
-- Benchmarks against `Rc` on cyclic structures
+- [ ] `#[derive(Trace)]`
+- [x] Explicit mark stack instead of recursion
+- [ ] Benchmarks against `Rc` on cyclic structures

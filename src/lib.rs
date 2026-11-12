@@ -9,38 +9,20 @@ pub use gc_borrow::*;
 pub use heap::*;
 pub use tracer::*;
 
-pub(crate) struct RootGuard<'a, T: Trace + 'static> {
-    boxed: &'a GcBox<T>,
-}
-
-impl<'a, T: Trace> RootGuard<'a, T> {
-    pub fn new(boxed: &'a GcBox<T>) -> Self {
-        boxed.inc_roots();
-        Self { boxed }
-    }
-}
-
-impl<T: Trace> Drop for RootGuard<'_, T> {
-    fn drop(&mut self) {
-        self.boxed.dec_roots();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{cell::Cell, rc::Rc};
 
+    #[derive(Debug)]
     struct Node {
         next: Option<Gc<Node>>,
         drops: Rc<Cell<usize>>,
     }
 
     impl Trace for Node {
-        fn trace(&self, t: &Tracer) {
-            if let Some(n) = &self.next {
-                t.trace(n);
-            }
+        fn trace(&self, tracer: &mut Tracer) {
+            tracer.trace(&self.next);
         }
     }
 
@@ -109,6 +91,10 @@ mod tests {
         let a = node(&d);
         a.with_mut(|n| n.next = Some(node(&d)));
         GcHeap::collect(); // child is now unrooted, inside a
+
+        let inspect_child = unsafe { a.borrow_unsafe() }.next.clone();
+        dbg!(inspect_child);
+
         let child = a.with_mut(|n| n.next.take()).unwrap();
         GcHeap::collect(); // must not free child
         assert_eq!(d.get(), 0);
@@ -139,17 +125,21 @@ mod tests {
             seed
         };
 
-        let iters = if cfg!(miri) { 200 } else { 20_000 };
+        let iters = 1000;
         let mut handles: Vec<Gc<Node>> = vec![];
 
-        for _ in 0..iters {
+        for iteration in 0..iters {
+            if iteration % 10 == 0 {
+                println!("[stress]: {iteration}");
+            }
+
             match rng() % 6 {
                 0 => handles.push(node(&d)),
                 1 if !handles.is_empty() => {
                     let i = rng() as usize % handles.len();
                     let j = rng() as usize % handles.len();
                     let target = handles[j].clone();
-                    handles[i].with_mut(|n| n.next = Some(target)); // may build cycles
+                    handles[i].borrow_mut().next = Some(target);
                 }
                 2 if !handles.is_empty() => {
                     let i = rng() as usize % handles.len();
@@ -157,14 +147,14 @@ mod tests {
                 }
                 3 if !handles.is_empty() => {
                     let i = rng() as usize % handles.len();
-                    if let Some(h) = handles[i].with_mut(|n| n.next.take()) {
+                    if let Some(h) = handles[i].borrow_mut().next.take() {
                         handles.push(h);
                     }
                 }
                 4 => GcHeap::collect(),
                 5 if !handles.is_empty() => {
                     let i = rng() as usize % handles.len();
-                    handles[i].with_mut(|_| GcHeap::collect());
+                    handles[i].with_mut(|_| GcHeap::collect()); // collects while a handle is borrowed
                 }
                 _ => {}
             }

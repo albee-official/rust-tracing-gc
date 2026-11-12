@@ -3,36 +3,36 @@ use std::collections::{BTreeSet, HashSet, VecDeque};
 use super::*;
 
 impl<T: Trace> Trace for Gc<T> {
-    fn trace(&self, tracer: &Tracer) {
-        let boxed = unsafe { self.boxed.as_ref() };
+    fn trace(&self, tracer: &mut Tracer) {
+        let ptr = unsafe { self.ptr.as_ref() };
 
-        match tracer.operation {
-            TraceOperation::Mark { generation } => {
-                // do not visit other gc objects if already visited them
-                if self.traced(tracer) {
+        match tracer.traversal {
+            TraceTraversal::Deep { id } => {
+                if tracer.was_last_visitor_of(self.ptr) {
                     return;
                 }
 
-                boxed.last_tracer_id.set(tracer.id);
-                boxed.generation.set(generation);
+                ptr.last_deep_tracer_id.set(id);
 
-                if T::needs_trace()
-                    && let Ok(data) = boxed.data.try_borrow()
-                {
-                    data.trace(tracer);
+                if T::needs_trace() {
+                    tracer.queue_next_ptr(self.ptr);
                 }
             }
 
-            TraceOperation::RootImmediateChildren => {
-                if !self.rooted.replace(true) {
-                    boxed.inc_roots()
-                }
+            TraceTraversal::Shallow => (),
+        }
+
+        match tracer.operation {
+            TraceOperation::Mark { generation } => {
+                ptr.generation.set(generation);
             }
 
-            TraceOperation::UnrootImmediateChildren => {
-                if self.rooted.replace(false) {
-                    boxed.dec_roots()
-                }
+            TraceOperation::Root => {
+                self.root_cell.root(self.ptr);
+            }
+
+            TraceOperation::Unroot => {
+                self.root_cell.unroot();
             }
         }
     }
@@ -46,7 +46,7 @@ impl<T: Trace> Trace for Option<T> {
         T::needs_trace()
     }
 
-    fn trace(&self, tracer: &Tracer) {
+    fn trace(&self, tracer: &mut Tracer) {
         if !T::needs_trace() {
             return;
         }
@@ -65,7 +65,7 @@ impl<T: Trace, Error: Trace> Trace for Result<T, Error> {
         T::needs_trace() || Error::needs_trace()
     }
 
-    fn trace(&self, tracer: &Tracer) {
+    fn trace(&self, tracer: &mut Tracer) {
         match self {
             Ok(v) => v.trace(tracer),
             Err(e) => e.trace(tracer),
@@ -74,7 +74,7 @@ impl<T: Trace, Error: Trace> Trace for Result<T, Error> {
 }
 
 impl<T: Trace> Trace for [T] {
-    fn trace(&self, tracer: &Tracer) {
+    fn trace(&self, tracer: &mut Tracer) {
         if !T::needs_trace() {
             return;
         }
@@ -90,7 +90,7 @@ impl<T: Trace, const N: usize> Trace for [T; N] {
         T::needs_trace()
     }
 
-    fn trace(&self, tracer: &Tracer) {
+    fn trace(&self, tracer: &mut Tracer) {
         self.as_slice().trace(tracer)
     }
 }
@@ -101,16 +101,16 @@ macro_rules! impl_trace_smart_ptr {
         $(
             impl<T: Trace> Trace for $ptr<T> {
                 fn needs_trace() -> bool { T::needs_trace() }
-                fn trace(&self, tracer: &Tracer) { (**self).trace(tracer) }
+                fn trace(& self, tracer: &mut Tracer) { (**self).trace(tracer) }
             }
 
             impl<T: Trace> Trace for $ptr<[T]> {
                 fn needs_trace() -> bool { T::needs_trace() }
-                fn trace(&self, tracer: &Tracer) { (**self).trace(tracer) }
+                fn trace(& self, tracer: &mut Tracer) { (**self).trace(tracer) }
             }
 
             impl Trace for $ptr<dyn Trace> {
-                fn trace(&self, tracer: &Tracer) { (**self).trace(tracer) }
+                fn trace(& self, tracer: &mut Tracer) { (**self).trace(tracer) }
             }
         )*
     };
@@ -128,7 +128,7 @@ macro_rules! impl_trace_leaf {
                     false
                 }
 
-                fn trace(&self, _: &Tracer) {}
+                fn trace(&self, _: &mut Tracer) {}
             }
         )*
     };
@@ -146,7 +146,7 @@ macro_rules! impl_trace_iter {
                     T::needs_trace()
                 }
 
-                fn trace(&self, tracer: &Tracer) {
+                fn trace(& self, tracer: &mut Tracer) {
                     if !T::needs_trace() {
                         return;
                     }
