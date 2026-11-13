@@ -2,13 +2,13 @@ use std::cell::{Cell, RefCell};
 
 use super::*;
 
-pub(crate) type GcTracerId = u64;
-pub(crate) type VisitStack = Vec<GcErasedObjectPtr>;
+pub type TracerId = u64;
+pub type TracerVisitStack = Vec<GcErasedObjectPtr>;
 pub type TracerFnVisitor = Box<dyn FnMut(GcErasedObjectPtr)>;
 
 thread_local! {
-    static ID_SOURCE: Cell<GcTracerId> = Cell::from(1);
-    static VISIT_STACK_POOL: RefCell<Vec<VisitStack>> = RefCell::new(vec![]);
+    static ID_SOURCE: Cell<TracerId> = Cell::from(1);
+    static VISIT_STACK_POOL: RefCell<Vec<TracerVisitStack>> = RefCell::new(vec![]);
 }
 
 pub enum TraceOperation {
@@ -19,17 +19,20 @@ pub enum TraceOperation {
 }
 
 pub enum TraceTraversal {
-    Deep { id: GcTracerId },
+    Deep { id: TracerId },
     Shallow,
 }
 
 pub struct Tracer {
-    pub(crate) operation: TraceOperation,
-    pub(crate) traversal: TraceTraversal,
-    pub(crate) visit_stack: VisitStack,
+    operation: TraceOperation,
+    traversal: TraceTraversal,
+    visit_stack: TracerVisitStack,
 }
 
-pub trait Trace {
+/// `Rc`/`Arc` are opaque to the collector. Any `Gc` stored inside stays
+/// rooted for as long as the `Rc` lives, and cycles through `Rc` are the
+/// user's responsibility (just use `Gc` if you have cycles, it's the whole point of a garbage collector)
+pub unsafe trait Trace {
     fn trace(&self, tracer: &mut Tracer);
 
     fn needs_trace() -> bool
@@ -41,7 +44,7 @@ pub trait Trace {
 }
 
 impl Tracer {
-    fn new_tracer_id() -> GcTracerId {
+    fn new_tracer_id() -> TracerId {
         ID_SOURCE.with(|source| {
             let id = source.get();
             source.set(id + 1);
@@ -49,11 +52,11 @@ impl Tracer {
         })
     }
 
-    fn get_visit_stack() -> VisitStack {
-        VISIT_STACK_POOL.with_borrow_mut(|pool| pool.pop().unwrap_or_else(VisitStack::new))
+    fn get_visit_stack() -> TracerVisitStack {
+        VISIT_STACK_POOL.with_borrow_mut(|pool| pool.pop().unwrap_or_else(TracerVisitStack::new))
     }
 
-    fn return_visit_stack(mut queue: VisitStack) {
+    fn return_visit_stack(mut queue: TracerVisitStack) {
         queue.clear();
         VISIT_STACK_POOL.with_borrow_mut(|pool| {
             if pool.len() > 4 {
@@ -81,7 +84,7 @@ impl Tracer {
         Self::new(TraceOperation::Unroot, TraceTraversal::Shallow)
     }
 
-    pub fn visit_shallow(visitor: TracerFnVisitor) -> Self {
+    pub unsafe fn visit_shallow(visitor: TracerFnVisitor) -> Self {
         Self::new(TraceOperation::VisitFn { visitor }, TraceTraversal::Shallow)
     }
 
@@ -91,6 +94,22 @@ impl Tracer {
             traversal,
             visit_stack: Self::get_visit_stack(),
         }
+    }
+
+    pub fn operation(&self) -> &TraceOperation {
+        &self.operation
+    }
+
+    pub fn operation_mut(&mut self) -> &mut TraceOperation {
+        &mut self.operation
+    }
+
+    pub fn traversal(&self) -> &TraceTraversal {
+        &self.traversal
+    }
+
+    pub fn traversal_mut(&mut self) -> &mut TraceTraversal {
+        &mut self.traversal
     }
 
     pub fn was_last_visitor_of<T: Trace>(&self, ptr: GcObjectPtr<T>) -> bool {
@@ -106,7 +125,7 @@ impl Tracer {
     }
 
     /// visits all objects reachable from ptr to the obj
-    pub(crate) fn visit_from_ptr<T: Trace>(&mut self, ptr: GcObjectPtr<T>) {
+    pub fn visit_from_ptr<T: Trace>(&mut self, ptr: GcObjectPtr<T>) {
         self.push_next_ptr(ptr);
         self.visit_stack();
     }

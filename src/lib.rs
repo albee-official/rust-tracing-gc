@@ -12,7 +12,7 @@ pub use tracer::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::Cell, ptr::NonNull, rc::Rc};
+    use std::{cell::Cell, rc::Rc};
 
     #[derive(Debug)]
     struct Node {
@@ -20,7 +20,7 @@ mod tests {
         drops: Rc<Cell<usize>>,
     }
 
-    impl Trace for Node {
+    unsafe impl Trace for Node {
         fn trace(&self, tracer: &mut Tracer) {
             tracer.trace(&self.next);
         }

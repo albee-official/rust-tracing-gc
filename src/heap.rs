@@ -7,7 +7,7 @@ use std::{
 use super::*;
 
 pub type GcGenerationNumber = u64;
-pub type GcRootsNumber = u16;
+pub type GcRootsNumber = usize;
 pub type GcObjectPtr<T> = NonNull<GcObject<T>>;
 pub type GcErasedObjectPtr = NonNull<dyn GcAlloc>;
 
@@ -100,8 +100,8 @@ impl GcHeap {
 
 pub trait GcAlloc {
     fn is_alive(&self, current_generation: GcGenerationNumber) -> bool;
-    fn get_last_deep_tracer_id(&self) -> GcTracerId;
-    fn set_last_deep_tracer_id(&self, id: GcTracerId);
+    fn get_last_deep_tracer_id(&self) -> TracerId;
+    fn set_last_deep_tracer_id(&self, id: TracerId);
     fn set_generation(&self, id: GcGenerationNumber);
     fn is_rooted(&self) -> bool;
     fn mark_dirty(&self) -> bool;
@@ -113,7 +113,7 @@ pub trait GcAlloc {
 #[derive(Debug)]
 pub struct GcObject<T: Trace + 'static> {
     generation: Cell<GcGenerationNumber>,
-    last_deep_tracer_id: Cell<GcTracerId>, // allows for multiple recursive trace passes regardless of the generation
+    last_deep_tracer_id: Cell<TracerId>, // allows for multiple recursive trace passes regardless of the generation
     roots: Cell<GcRootsNumber>,
     dirty: Cell<bool>,
 
@@ -129,11 +129,11 @@ impl<T: Trace + 'static> GcAlloc for GcObject<T> {
         self.generation.set(num);
     }
 
-    fn get_last_deep_tracer_id(&self) -> GcTracerId {
+    fn get_last_deep_tracer_id(&self) -> TracerId {
         self.last_deep_tracer_id.get()
     }
 
-    fn set_last_deep_tracer_id(&self, id: GcTracerId) {
+    fn set_last_deep_tracer_id(&self, id: TracerId) {
         self.last_deep_tracer_id.set(id)
     }
 
@@ -256,8 +256,8 @@ impl<T: Trace + 'static> RootGuardCell<T> {
     pub fn is_rooted(&self) -> bool {
         let value = unsafe { self.guard.as_ptr().as_ref_unchecked() };
         match value {
-            Some(_) => false,
-            None => true,
+            Some(_) => true,
+            None => false,
         }
     }
 

@@ -1,18 +1,23 @@
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    rc::Rc,
+    sync::Arc,
+};
 
 use super::*;
 
-impl<T: Trace> Trace for Gc<T> {
+unsafe impl<T: Trace> Trace for Gc<T> {
     fn trace(&self, tracer: &mut Tracer) {
         let obj = unsafe { self.as_ptr().as_ref() };
 
-        match tracer.traversal {
+        match tracer.traversal() {
             TraceTraversal::Deep { id } => {
                 if tracer.was_last_visitor_of(self.as_ptr()) {
                     return;
                 }
 
-                obj.set_last_deep_tracer_id(id);
+                obj.set_last_deep_tracer_id(*id);
 
                 if T::needs_trace() {
                     tracer.push_next_ptr(self.as_ptr());
@@ -22,9 +27,9 @@ impl<T: Trace> Trace for Gc<T> {
             TraceTraversal::Shallow => (),
         }
 
-        match tracer.operation {
+        match tracer.operation_mut() {
             TraceOperation::Mark { generation } => {
-                obj.set_generation(generation);
+                obj.set_generation(*generation);
             }
 
             TraceOperation::Root => {
@@ -36,12 +41,19 @@ impl<T: Trace> Trace for Gc<T> {
                 self.unroot();
             },
 
-            TraceOperation::VisitFn { ref mut visitor } => visitor(self.as_ptr()),
+            TraceOperation::VisitFn { visitor } => visitor(self.as_ptr()),
         }
+    }
+
+    fn needs_trace() -> bool
+    where
+        Self: Sized,
+    {
+        true
     }
 }
 
-impl<T: Trace> Trace for Option<T> {
+unsafe impl<T: Trace> Trace for Option<T> {
     fn needs_trace() -> bool
     where
         Self: Sized,
@@ -60,7 +72,7 @@ impl<T: Trace> Trace for Option<T> {
     }
 }
 
-impl<T: Trace, Error: Trace> Trace for Result<T, Error> {
+unsafe impl<T: Trace, Error: Trace> Trace for Result<T, Error> {
     fn needs_trace() -> bool
     where
         Self: Sized,
@@ -76,7 +88,7 @@ impl<T: Trace, Error: Trace> Trace for Result<T, Error> {
     }
 }
 
-impl<T: Trace> Trace for [T] {
+unsafe impl<T: Trace> Trace for [T] {
     fn trace(&self, tracer: &mut Tracer) {
         if !T::needs_trace() {
             return;
@@ -88,7 +100,7 @@ impl<T: Trace> Trace for [T] {
     }
 }
 
-impl<T: Trace, const N: usize> Trace for [T; N] {
+unsafe impl<T: Trace, const N: usize> Trace for [T; N] {
     fn needs_trace() -> bool {
         T::needs_trace()
     }
@@ -98,21 +110,88 @@ impl<T: Trace, const N: usize> Trace for [T; N] {
     }
 }
 
+unsafe impl<K: Trace, V: Trace, S> Trace for HashMap<K, V, S> {
+    fn needs_trace() -> bool {
+        K::needs_trace() || V::needs_trace()
+    }
+
+    fn trace(&self, tracer: &mut Tracer) {
+        if !Self::needs_trace() {
+            return;
+        }
+        for (k, v) in self {
+            tracer.trace(k);
+            tracer.trace(v);
+        }
+    }
+}
+
+unsafe impl<T: Trace> Trace for RefCell<T> {
+    fn needs_trace() -> bool {
+        T::needs_trace()
+    }
+
+    fn trace(&self, tracer: &mut Tracer) {
+        // Same policy as GcObject::trace_data: if it's mutably borrowed, its
+        // contents are already rooted, so skipping is safe.
+
+        if let Ok(inner) = self.try_borrow() {
+            tracer.trace(&*inner);
+        }
+    }
+}
+
+unsafe impl<T: Trace> Trace for Cell<T> {
+    fn needs_trace() -> bool {
+        T::needs_trace()
+    }
+
+    fn trace(&self, tracer: &mut Tracer) {
+        // SAFETY: tracing never calls `set`/`replace` on this cell, and the
+        // reference doesn't outlive this call. (Note: a user-supplied
+        // `visit_shallow` closure must not touch the cell either.)
+        let inner = unsafe { &*self.as_ptr() };
+        tracer.trace(inner);
+    }
+}
+
+unsafe impl<T: ?Sized> Trace for Rc<T> {
+    fn needs_trace() -> bool {
+        false
+    }
+    fn trace(&self, _: &mut Tracer) {}
+}
+
+unsafe impl<T: ?Sized> Trace for Arc<T> {
+    fn needs_trace() -> bool {
+        false
+    }
+    fn trace(&self, _: &mut Tracer) {}
+}
+
+// &'static T: static data is never collected, so nothing to trace.
+unsafe impl<T: ?Sized> Trace for &'static T {
+    fn needs_trace() -> bool {
+        false
+    }
+    fn trace(&self, _: &mut Tracer) {}
+}
+
 #[macro_export]
 macro_rules! impl_trace_smart_ptr {
     ($($ptr:ident),* $(,)?) => {
         $(
-            impl<T: Trace> Trace for $ptr<T> {
+            unsafe impl<T: Trace> Trace for $ptr<T> {
                 fn needs_trace() -> bool { T::needs_trace() }
                 fn trace(& self, tracer: &mut Tracer) { (**self).trace(tracer) }
             }
 
-            impl<T: Trace> Trace for $ptr<[T]> {
+            unsafe impl<T: Trace> Trace for $ptr<[T]> {
                 fn needs_trace() -> bool { T::needs_trace() }
                 fn trace(& self, tracer: &mut Tracer) { (**self).trace(tracer) }
             }
 
-            impl Trace for $ptr<dyn Trace> {
+            unsafe impl Trace for $ptr<dyn Trace> {
                 fn trace(& self, tracer: &mut Tracer) { (**self).trace(tracer) }
             }
         )*
@@ -123,7 +202,7 @@ macro_rules! impl_trace_smart_ptr {
 macro_rules! impl_trace_leaf {
     ($($t:ty),* $(,)?) => {
         $(
-            impl Trace for $t {
+            unsafe impl Trace for $t {
                 fn needs_trace() -> bool
                 where
                     Self: Sized,
@@ -141,7 +220,7 @@ macro_rules! impl_trace_leaf {
 macro_rules! impl_trace_iter {
     ($($t:ident),* $(,)?) => {
         $(
-            impl<T: Trace> Trace for $t<T> {
+            unsafe impl<T: Trace> Trace for $t<T> {
                 fn needs_trace() -> bool
                 where
                     Self: Sized,
@@ -160,6 +239,24 @@ macro_rules! impl_trace_iter {
                 }
             }
         )*
+    };
+}
+
+macro_rules! impl_trace_tuple {
+    ($(($($name:ident),+)),+ $(,)?) => {
+        $(
+            unsafe impl<$($name: Trace),+> Trace for ($($name,)+) {
+                fn needs_trace() -> bool {
+                    false $(|| $name::needs_trace())+
+                }
+
+                #[allow(non_snake_case)]
+                fn trace(&self, tracer: &mut Tracer) {
+                    let ($($name,)+) = self;
+                    $( tracer.trace($name); )+
+                }
+            }
+        )+
     };
 }
 
@@ -186,4 +283,15 @@ impl_trace_leaf!(
     char,
     String,
     (),
+);
+
+impl_trace_tuple!(
+    (A),
+    (A, B),
+    (A, B, C),
+    (A, B, C, D),
+    (A, B, C, D, E),
+    (A, B, C, D, E, F),
+    (A, B, C, D, E, F, G),
+    (A, B, C, D, E, F, G, H),
 );
